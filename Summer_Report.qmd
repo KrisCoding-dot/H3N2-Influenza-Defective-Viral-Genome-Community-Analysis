@@ -1,0 +1,1513 @@
+---
+title: "Collated Bioinformatics Findings on Most Abundant Influenza Defective Genomes"
+format: html
+editor: visual
+---
+
+## Length Analysis of Abundant Influenza Defective Genomes Across Patient Samples
+
+## Data and Reproducibility Notes
+
+As portions of the data used in this project are part of ongoing research, all data import (read-in) code has been removed from this repository to maintain academic integrity and protect unpublished results. With this exception, all code presented here is complete and functional, provided the corresponding data files are supplied.
+
+Findings related to patient hospitalisation status have also been omitted, as this data is not yet publicly available. All other findings presented can be reproduced using publicly available data.
+
+## Project Background
+
+Defective viral genomes (DVGs) are truncated forms of a wildtype virus that have lost a large, functionally important portion of their genome. This loss typically renders them incapable of independent replication; however, DVGs can persist and proliferate by exploiting the replicative machinery (the "public goods") produced by wildtype virus during coinfection. In doing so, DVGs can interfere with wildtype replication and, in some cases, outcompete it. This makes DVGs of considerable scientific interest: because they are replication-incompetent on their own and depend entirely on coinfection with a wildtype virus, they represent a potential avenue for future antiviral therapies. This project investigates the length and positional characteristics of abundant DVGs across patient influenza samples, with the aim of establishing a principled bin length for grouping DVGs by segment, a necessary foundation for any subsequent analysis of DVG diversity and abundance.
+
+## Overview
+
+This repository presents the main finding from my summer project, followed by the supplementary and preliminary analyses that informed and led to it. Each section includes the associated analysis code.
+
+## Determining an Optimal Bin Length for Defective Viral Genome (DVG) Grouping
+
+### Motivation
+
+Communities of DVGs vary substantially in both the position and size of individual genomes within a given segment. Without first characterising the extent of this length variation, prior analyses lacked a principled basis for grouping DVGs, and so did not produce conclusive or meaningful results. The aim of this analysis was therefore to determine the bin length at which the greatest number of DVGs within a segment would be correctly grouped as a single DVG, rather than being split into multiple distinct DVGs.
+
+### Method
+
+I developed a function that takes a dataset and a segment name as parameters and performs the following steps:
+
+1.  Identifies the most abundant DVG (by total read count) present in each sample for the given segment.
+
+2.  Performs pairwise comparisons between DVGs to calculate the absolute difference in length, accounting for the genomic position of each DVG.
+
+3.  Iterates over a range of cutoff values, from 1 up to the largest absolute difference observed in the dataset. For each cutoff, every pairwise absolute difference is classified as `TRUE` (≤ cutoff) or `FALSE` (\> cutoff). The loop continues until all values are classified as `TRUE`, which necessarily occurs once the cutoff reaches the maximum observed difference.
+
+4.  For each cutoff value, calculates the proportion of `TRUE` classifications, producing a cumulative proportion curve that reaches 1 at the maximum cutoff.
+
+This function was applied independently to each genomic segment, and the results were visualised as a faceted line plot of cumulative proportion (of `TRUE` values) against cutoff value, faceted by segment.
+
+```{r}
+#| label: Loading in Libraries for this Report
+
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(magrittr)
+library(vegan)
+library(ggplot2)
+library(purrr)
+library(patchwork)
+library(forcats)
+library(FactoMineR)
+library(factoextra)
+library(gplots)
+library(corrplot)
+library(RColorBrewer)
+library(ggbeeswarm)
+library(plotly)
+library(pacman)
+library(usedist)
+library(betareg)
+library(statmod)
+library(performance)
+library(car)
+library(broom)
+library(emmeans)
+```
+
+```{r}
+#| label: Comparing Absolute Difference of Most Abundant Cheats in Each Segment for Each Sample
+
+#Function which has nested functions for comparing and storing pairwise absolute difference values, then runs a loop to find the proportion of pairwise comparisons which are below or equal to a certain threshhold (cutoff) absolute difference, and then the proportion of true is found for each cutoff point and stored in a two column dataframe with one column holding the cutoff size and the other holding the proportion true
+process_segment <- function(segment_name, full_dataset) {
+  
+  # Filter the dataset to keep only rows belonging to the selected segment
+  filtered_df <- full_dataset |> 
+    filter(Segment == segment_name) 
+  
+  # For each SRR, keep the row with the highest TotalRC value
+  ma <- filtered_df |> 
+    group_by(SRR) |> 
+    slice_max(order_by = TotalRC, n = 1, with_ties = FALSE) |> 
+    as.data.frame()
+  
+  # Use the SRR values as row names
+  rownames(ma) <- ma$SRR
+  
+  # Define a helper function to calculate pairwise differences
+  pairwise_diff <- function(df){
+    
+    # Number of rows (one row per SRR)
+    n_cols <- nrow(df)
+    
+    # Create a square matrix initialized with 1s
+    # Rows and columns represent SRRs
+    diffmatrix <- matrix(1, nrow = n_cols, ncol = n_cols)
+    
+    # Label the rows and columns with SRR names
+    rownames(diffmatrix) <- rownames(df)
+    colnames(diffmatrix) <- rownames(df)
+    
+    # Extract the End and Start coordinates
+    end_col <- df$End
+    start_col <- df$Start
+    
+    # Compare every pair of SRRs
+    for (i in 1:(n_cols - 1)) {
+      
+      # Compare row i with every following row
+      for (j in (i + 1):n_cols) {
+        
+        # Coordinates for sample i
+        start_i <- start_col[i]
+        end_i <- end_col[i]
+        
+        # Coordinates for sample j
+        start_j <- start_col[j]
+        end_j <- end_col[j]
+        
+        # Calculate the total absolute difference in start and end positions
+        absdiff <- abs(start_i - start_j) + abs(end_i - end_j)
+        
+        # Store the value in the upper triangle
+        diffmatrix[i, j] <- absdiff
+        
+        # Store the same value in the lower triangle (matrix is symmetric)
+        diffmatrix[j, i] <- absdiff
+      }
+    }
+    
+    # Return the completed distance matrix
+    return(diffmatrix)
+  }
+  
+  # Convert the pairwise difference matrix into a long-format table
+  ma_df <- pairwise_diff(ma) |> 
+    
+    # Convert matrix to data frame
+    as.data.frame() |> 
+    
+    # Move row names into a column called SRR
+    rownames_to_column(var = "SRR") |> 
+    
+    # Convert from wide format to long format
+    # Each row becomes one SRR comparison
+    pivot_longer(cols = -SRR, names_to = "SRR_Pair") |> 
+    
+    # Create a combined identifier for each SRR pair
+    unite("Pairs", SRR, SRR_Pair, sep = "_", remove = FALSE) |> 
+    
+    # Keep only the pair identifier and difference value
+    select(Pairs, value) |> 
+    
+    # Remove self-comparisons and identical coordinates (difference ≤ 1)
+    filter(value > 1) |> 
+    
+    # Convert to a standard data frame
+    as.data.frame()
+  
+  # Define a helper function to create cumulative cutoff tables
+  cutoff <- function(df) {
+    
+    # Extract the difference values
+    diff <- df[[2]]
+    
+    # Find the largest observed difference
+    max_diff <- max(diff, na.rm = TRUE)
+    
+    # Create an empty matrix
+    # Rows = SRR pairs
+    # Columns = cutoff values from 1 to max_diff
+    results_matrix <- matrix(
+      NA,
+      nrow = length(diff),
+      ncol = max_diff
+    )
+    
+    # For each cutoff value
+    for (bin in 1:max_diff) {
+      
+      # Record TRUE if the pairwise difference is less than or equal to the cutoff
+      results_matrix[, bin] <- diff <= bin
+    }
+    
+    # Convert matrix to data frame
+    results_df <- as.data.frame(results_matrix)
+    
+    # Name columns according to the cutoff values
+    colnames(results_df) <- paste0(1:max_diff)
+    
+    # Use pair names as row names
+    rownames(results_df) <- df[[1]]
+    
+    # Return the logical cutoff table
+    return(results_df)
+  }
+  
+  # Calculate the cumulative proportion of pairs below each cutoff
+  prop_diff <- cutoff(ma_df) |> 
+    
+    # Transpose so each row represents one cutoff value
+    t() |> 
+    
+    # Convert to data frame
+    as.data.frame() |> 
+    
+    # Calculate the proportion of TRUE values for each cutoff
+    mutate(proportion_true = rowMeans(pick(where(is.logical)), na.rm = TRUE)) |> 
+    
+    # Move row names (cutoff values) into a column
+    rownames_to_column(var = "bin_size") |>
+    
+    # Convert cutoff labels to numeric values
+    mutate(bin_numeric = as.numeric(bin_size)) |> 
+    
+    # Keep only the cutoff and its corresponding proportion
+    select(bin_numeric, proportion_true)
+  
+  # Return the final table of cumulative proportions
+  return(prop_diff)
+}
+
+#List of all of the influenza segments so that the above function can be run for all
+segments <- c('PB1', 'PB2', 'PA', 'NA', 'HA', 'NP', 'MP', 'NS')
+
+#Stores a list of dataframes for each segment which has the above function applied to it using the full dataset 'merged'
+results_list <- lapply(segments, process_segment, full_dataset = merged)
+names(results_list) <- segments
+combined_df <- bind_rows(results_list, .id = "Segment")
+
+#Finding the number of samples per segment
+sample_counts <- merged %>%
+  distinct(Segment, SRR) %>%
+  count(Segment)%>%
+  mutate(label = paste0("n = ", n))
+
+#Rowan colour palette
+colors <- c(
+  "PB2" = "#DD4124",
+  "PB1" = "#ED8B00",
+  "PA" = "#EDD746",
+  "HA" = "#003552",
+  "NP" = "#0F85A0",
+  "NA" = "#A4D0F4",
+  "MP" = "#61599D",
+  "NS" = "#EBAFAD"
+)
+
+#Facetted plot
+ggplot(combined_df, aes(x = bin_numeric, y = proportion_true, color = Segment)) +
+  geom_line() +
+  facet_wrap(~Segment, ncol = 4, scales = "free_x") + 
+  theme_minimal()+
+  scale_color_manual(values = colors) +
+  geom_text(
+    data = sample_counts,
+    aes(label = label),
+    x = Inf, y = -Inf,         
+    hjust = 1.0, vjust = -2.0,  
+    inherit.aes = FALSE        
+  ) +
+  labs(
+    title = "Proportion of Pairs Within Distance Cutoff by Segment",
+    x = "Distance Bin Cutoff",
+    y = "Proportion (True)",
+    color = "Comparison Group"
+  )+
+  theme(legend.position = "none")
+
+```
+
+### Findings and Follow-Up
+
+Discussion of these results with my supervisors highlighted a distinct inflection ("kink") in the resulting curves, most notably in the polymerase segments. I proposed that this pattern reflects the presence of two positionally distinct subpopulations of DVGs within a segment, which converge into a single group only at large cutoff values, owing to their substantial difference in genomic position.
+
+To test this interpretation, I repeated the analysis using only the absolute length difference between DVGs, excluding positional information. We further discussed extending this analysis to patient groups stratified by hospitalisation status, to assess whether the trend and inflection point differed within or between groups. We hypothesised that hospitalised individuals would show earlier plateauing, reflecting more homogeneous DVG communities. As this component is part of ongoing research, the corresponding results are not reported here; however, the code for both analyses (grouped and length-only) is provided below.
+
+The length-only analysis did not reproduce the prominent inflection observed previously, supporting the interpretation that DVG position, rather than length alone, underlies the pattern, and lending further support to the presence of two distinct DVG subtypes within these samples.
+
+To investigate this further, I adapted a visualisation approach provided by my supervisor, in which each DVG is plotted as a line representing its length and start/end position relative to other DVGs. I then plotted DVG end-tail position against segment length, coloured by DVG load, to assess whether larger deletions were associated with higher overall DVG load. This did not yield a conclusive result, as no clear pattern emerged.
+
+I also conducted a deeper analysis of samples whose most abundant cheat was shorter than 1000 bp, subsampling these from the full dataframe and visualising their five most abundant cheats. This was done to investigate whether the most abundant DVG might be in linkage with a larger DVG. The results showed that many of these samples also contained a large DVG present at high abundance; however, their start and end sites differed by a minimum of 15 nucleotides.
+
+More detailed linkage analysis showed that of the 34 samples analysed, 14 had no detectable linkage events, while the remaining samples had between 1 and 20 linked events. The variation in the number of linked events suggests that small deletions may accumulate over time and potentially contribute to the formation of larger deletions, although multiple independent small deletions may also occur within the same sample.
+
+I also compared DVG abundance between samples with and without detectable linkage events. Samples with linkage events showed considerably higher cheat loads than samples without detected linkage, suggesting a potential association between deletion linkage and DVG abundance.
+
+The code below outlines the construction of the plots used for each of the analyses discussed above.
+
+```{r}
+#| label: Same as Before but Using Absolute Length Difference Only
+
+process_length <- function(segment_name, full_dataset) {
+  
+  # Filter the dataset to keep only rows belonging to the selected segment
+  filtered_df <- full_dataset |> 
+    filter(Segment == segment_name) 
+  
+  # For each SRR, keep the row with the highest TotalRC value
+  ma <- filtered_df |> 
+    group_by(SRR) |> 
+    slice_max(order_by = TotalRC, n = 1, with_ties = FALSE) |> 
+    as.data.frame()
+  
+  # Use the SRR values as row names
+  rownames(ma) <- ma$SRR
+  
+  # Define a helper function to calculate pairwise differences
+  pairwise_diff <- function(df){
+    n_cols <- nrow(df)
+    diffmatrix <- matrix(1, nrow = n_cols, ncol = n_cols)
+    rownames(diffmatrix) <- rownames(df)
+    colnames(diffmatrix) <- rownames(df)
+    for (i in 1:(n_cols - 1)) {
+      for (j in (i + 1):n_cols) {
+        absdiff <- abs(df$Length[i]) - abs(df$Length[j]) #This is the line of interest which differs from previous block for this analysis
+        diffmatrix[i, j] <- absdiff
+        diffmatrix[j, i] <- absdiff
+      }
+    }
+    return(diffmatrix)
+  }
+  
+  # Convert the pairwise difference matrix into a long-format table
+  ma_df <- pairwise_diff(ma) |> 
+    
+    # Convert matrix to data frame
+    as.data.frame() |> 
+    
+    # Move row names into a column called SRR
+    rownames_to_column(var = "SRR") |> 
+    
+    # Convert from wide format to long format
+    # Each row becomes one SRR comparison
+    pivot_longer(cols = -SRR, names_to = "SRR_Pair") |> 
+    
+    # Create a combined identifier for each SRR pair
+    unite("Pairs", SRR, SRR_Pair, sep = "_", remove = FALSE) |> 
+    
+    # Keep only the pair identifier and difference value
+    select(Pairs, value) |> 
+    
+    # Remove self-comparisons and identical coordinates (difference ≤ 1)
+    filter(value > 1) |> 
+    
+    # Convert to a standard data frame
+    as.data.frame()
+  
+  # Define a helper function to create cumulative cutoff tables
+  cutoff <- function(df) {
+    
+    # Extract the difference values
+    diff <- df[[2]]
+    
+    # Find the largest observed difference
+    max_diff <- max(diff, na.rm = TRUE)
+    
+    # Create an empty matrix
+    # Rows = SRR pairs
+    # Columns = cutoff values from 1 to max_diff
+    results_matrix <- matrix(
+      NA,
+      nrow = length(diff),
+      ncol = max_diff
+    )
+    
+    # For each cutoff value
+    for (bin in 1:max_diff) {
+      
+      # Record TRUE if the pairwise difference is less than or equal to the cutoff
+      results_matrix[, bin] <- diff <= bin
+    }
+    
+    # Convert matrix to data frame
+    results_df <- as.data.frame(results_matrix)
+    
+    # Name columns according to the cutoff values
+    colnames(results_df) <- paste0(1:max_diff)
+    
+    # Use pair names as row names
+    rownames(results_df) <- df[[1]]
+    
+    # Return the logical cutoff table
+    return(results_df)
+  }
+  
+  # Calculate the cumulative proportion of pairs below each cutoff
+  prop_diff <- cutoff(ma_df) |> 
+    
+    # Transpose so each row represents one cutoff value
+    t() |> 
+    
+    # Convert to data frame
+    as.data.frame() |> 
+    
+    # Calculate the proportion of TRUE values for each cutoff
+    mutate(proportion_true = rowMeans(pick(where(is.logical)), na.rm = TRUE)) |> 
+    
+    # Move row names (cutoff values) into a column
+    rownames_to_column(var = "bin_size") |>
+    
+    # Convert cutoff labels to numeric values
+    mutate(bin_numeric = as.numeric(bin_size)) |> 
+    
+    # Keep only the cutoff and its corresponding proportion
+    select(bin_numeric, proportion_true)
+  
+  # Return the final table of cumulative proportions
+  return(prop_diff)
+}
+
+#List of all of the influenza segments so that the above function can be run for all
+segments <- c('PB1', 'PB2', 'PA', 'NA', 'HA', 'NP', 'MP', 'NS')
+
+#Stores a list of dataframes for each segment which has the above function applied to it using the full dataset 'merged'
+results_list <- lapply(segments, process_length, full_dataset = merged)
+names(results_list) <- segments
+combined_df <- bind_rows(results_list, .id = "Segment")
+
+#Finding the number of samples per segment
+sample_counts <- merged %>%
+  distinct(Segment, SRR) %>%
+  count(Segment)%>%
+  mutate(label = paste0("n = ", n))
+
+#Rowan colours
+colors <- c(
+  "PB2" = "#DD4124",
+  "PB1" = "#ED8B00",
+  "PA" = "#EDD746",
+  "HA" = "#003552",
+  "NP" = "#0F85A0",
+  "NA" = "#A4D0F4",
+  "MP" = "#61599D",
+  "NS" = "#EBAFAD"
+)
+
+#Facetted plot
+ggplot(combined_df, aes(x = bin_numeric, y = proportion_true, color = Segment)) +
+  geom_line() +
+  facet_wrap(~Segment, ncol = 4, scales = "free_x") + 
+  theme_minimal()+
+  scale_color_manual(values = colors) +
+  geom_text(
+    data = sample_counts,
+    aes(label = label),
+    x = Inf, y = -Inf,         
+    hjust = 1.0, vjust = -2.0,  
+    inherit.aes = FALSE        
+  ) +
+  labs(
+    title = "Proportion of Pairs Within Distance Cutoff by Segment (Length Only)",
+    x = "Distance Bin Cutoff",
+    y = "Proportion (True)",
+    color = "Comparison Group"
+  )+
+  theme(legend.position = "none")
+
+```
+
+```{r}
+#| label: Community Comparison of Absolute Difference in Most Abundant Cheats 
+
+process_community <- function(segment_name, full_dataset) {
+  
+  # Keep only rows corresponding to the selected genome segment
+  filtered_df <- full_dataset |> 
+    filter(Segment == segment_name) 
+  
+  # For each sample (SRR), retain only the most abundant deletion (highest TotalRC)
+  ma <- filtered_df |> 
+    group_by(SRR) |> 
+    slice_max(order_by = TotalRC, n = 1, with_ties = FALSE) |> 
+    as.data.frame()
+  
+  # Set the row names to the SRR identifiers for easier indexing later
+  rownames(ma) <- ma$SRR
+  
+  # Function to calculate pairwise distances between all samples
+  pairwise_diff <- function(df){
+    
+    # Number of samples (rows) in the dataframe
+    n_cols <- nrow(df)
+    
+    # Create an empty square matrix to store pairwise distances
+    # Initialise with 1s so the diagonal is not zero (helps remove self-comparisons later)
+    diffmatrix <- matrix(1, nrow = n_cols, ncol = n_cols)
+    
+    # Assign row and column names using the SRR identifiers
+    rownames(diffmatrix) <- rownames(df)
+    colnames(diffmatrix) <- rownames(df)
+    
+    # Extract deletion end coordinates
+    end_col <- df$End
+    
+    # Extract deletion start coordinates
+    start_col <- df$Start
+    
+    # Compare every sample against every other sample
+    for (i in 1:(n_cols - 1)) {
+      for (j in (i + 1):n_cols) {
+        
+        # Calculate the pairwise distance as the sum of the absolute
+        # differences between the start and end coordinates
+        absdiff <- abs(start_col[i] - start_col[j]) + abs(end_col[i] - end_col[j])
+        
+        # Store the distance in the upper triangle of the matrix
+        diffmatrix[i, j] <- absdiff
+        
+        # Mirror the value into the lower triangle to keep the matrix symmetric
+        diffmatrix[j, i] <- absdiff
+      }
+    }
+    
+    # Return the completed pairwise distance matrix
+    return(diffmatrix)
+  }
+  
+  # Convert the pairwise distance matrix into a long-format dataframe
+  ma_df <- pairwise_diff(ma) |> 
+    
+    # Convert the matrix to a dataframe
+    as.data.frame() |> 
+    
+    # Move row names (SRR IDs) into a column
+    rownames_to_column(var = "SRR") |> 
+    
+    # Convert from wide format to long format (one row per sample pair)
+    pivot_longer(cols = -SRR, names_to = "SRR_Pair") |> 
+    
+    # Create a unique identifier for each pair of samples
+    unite("Pairs", SRR, SRR_Pair, sep = "_", remove = FALSE) |> 
+    
+    # Keep only the relevant columns
+    select(Pairs, SRR, SRR_Pair, value) |> 
+    
+    # Remove self-comparisons (distance = 1 from initialisation)
+    filter(value > 1) |> 
+    
+    # Add hospitalization status for the first sample
+    left_join(Meta, by = c("SRR" = "Run")) |> 
+    rename(Status_1 = `Hospitalized?`) |> 
+    
+    # Add hospitalization status for the second sample
+    left_join(Meta, by = c("SRR_Pair" = "Run")) |> 
+    rename(Status_2 = `Hospitalized?`) |> 
+    
+    # Create a comparison group (e.g. No_No, No_Yes, Yes_Yes)
+    # pmin/pmax ensure that No_Yes and Yes_No are treated as the same group
+    mutate(Group = paste(pmin(Status_1, Status_2),
+                         pmax(Status_1, Status_2),
+                         sep = "_")) |> 
+    
+    # Keep only the pairwise distance and comparison group
+    select(value, Group)
+  
+  # Find the largest pairwise distance, ignoring any missing values
+  max_diff <- max(ma_df$value, na.rm = TRUE)
+  
+  # Generate a sequence of distance thresholds from 1 up to the maximum distance
+  bin_sequence <- 1:max_diff
+  
+  # For each distance threshold, calculate the proportion of sample pairs
+  # that fall within that cutoff for each hospitalization group
+  prop_diff <- purrr::map_dfr(bin_sequence, function(bin) {
+    ma_df |>
+      
+      # Analyse each hospitalization group separately
+      group_by(Group) |>
+      
+      # Calculate the proportion of distances less than or equal to the cutoff
+      summarise(
+        proportion_true = mean(value <= bin, na.rm = TRUE),
+        .groups = "drop"
+      ) |>
+      
+      # Record the current cutoff value for plotting
+      mutate(bin_numeric = bin)
+  })
+  
+  # Return the summary dataframe for this genome segment
+  return(prop_diff)
+}
+
+sample_counts <- merged %>%
+  distinct(Segment, SRR) %>%
+  count(Segment)%>%
+  mutate(label = paste0("n = ", n))
+
+segments <- c('PB1', 'PB2', 'PA', 'NA', 'HA', 'NP', 'MP', 'NS')
+
+#Stores a list of dataframes for each segment which has the above function applied to it using the full dataset 'merged'
+results_list <- lapply(segments, process_community, full_dataset = merged)
+names(results_list) <- segments
+combined_df <- bind_rows(results_list, .id = "Segment")
+
+ggplot(combined_df, aes(x = bin_numeric, y = proportion_true, color = Group, group = Group)) +
+  geom_line(linewidth = 0.8) +
+  facet_wrap(~Segment, ncol = 4, scales = "free_x") + 
+  theme_minimal() +
+  scale_color_manual(values = c(
+    "Yes_Yes" = "#D55E00", 
+    "No_Yes"  = "#E69F00", 
+    "No_No"   = "#009E73"
+  )) +
+  geom_text(
+    data = sample_counts,
+    aes(label = label),
+    x = Inf, y = -Inf,         
+    hjust = 1.0, vjust = -2.0,  
+    inherit.aes = FALSE        
+  ) +
+  labs(
+    title = "Proportion of Pairs Within Distance Cutoff by Segment, Grouped by Hospitalisation",
+    x = "Distance Bin Cutoff",
+    y = "Proportion (True)",
+    color = "Comparison Group"
+  ) +
+  theme(legend.position = "bottom") 
+```
+
+```{r}
+#| label: Visualising the Cheat Deletions
+
+visualise_prep <- function(segment_name, full_dataset) {
+  
+  # Filter the dataset to keep only rows belonging to the selected segment
+  filtered_df <- full_dataset |> 
+    filter(Segment == segment_name) 
+  
+  # For each SRR, keep the row with the highest TotalRC value
+  ma <- filtered_df |> 
+    group_by(SRR) |> 
+    slice_max(order_by = TotalRC, n = 1, with_ties = FALSE) |> 
+    as.data.frame()
+  
+  #Adds a Number to Each Cheat so that they can be Ordered
+  ma$Unique <- seq_len(nrow(ma))
+  
+  return(ma)
+}
+
+segments <- c('PB1', 'PB2', 'PA', 'NA', 'HA', 'NP', 'MP', 'NS')
+
+#Stores a list of dataframes for each segment which has the above function applied to it using the full dataset 'merged'
+results_list <- lapply(segments, visualise_prep, full_dataset = DVGs)
+names(results_list) <- segments
+combined_df <- bind_rows(results_list, .id = "Segment")
+
+combined_df <- combined_df %>%
+  
+  # Group the data by genome segment so numbering restarts within each segment
+  group_by(Segment) %>%
+  
+  # Sort deletions by their start coordinate within each segment
+  arrange(Length, .by_group = TRUE) %>%
+  
+  # Assign each deletion a unique sequential number within its segment
+  # (e.g. PB1: 1, 2, 3...; PB2: 1, 2, 3...)
+  mutate(Unique = row_number()) %>%
+  
+  # Remove the grouping so later operations treat the dataframe as a whole
+  ungroup()
+  
+p4<- ggplot(combined_df) +
+  facet_wrap(~Segment, ncol = 4, scales = "free") +
+  geom_segment(aes(x = Start,
+                   xend = End,
+                   y = Unique,
+                   yend = Unique,
+                   colour = 'red'),
+               linewidth = 0.2,
+               alpha = 1)  +
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(), 
+        legend.position = "none")
+```
+
+```{r}
+#| label: Cheat load Comparison Between Most Abundant Cheats
+
+#Running the exact same function as previously, so did not include in this chunk
+results_list <- lapply(segments, visualise_prep, full_dataset = cheatload)
+names(results_list) <- segments
+combined_df <- bind_rows(results_list, .id = "Segment")
+
+#Process the combined dataframe to create unique identifiers and calculate deletion sizes
+combined_df <- combined_df %>%
+  
+  #Perform the following operations separately for each influenza genome segment
+  group_by(Segment) %>%
+  
+  #Sort deletions by their start coordinate within each segment
+  arrange(Start, .by_group = TRUE) %>%
+  
+  #Assign a unique sequential number to each deletion within a segment
+  mutate(Unique = row_number()) %>%
+  
+  #Remove the grouping so subsequent operations act on the entire dataframe
+  ungroup() %>%
+  
+  #Calculate the size of each deletion (end position minus start position)
+  mutate(Deletion_Size = End - Start) %>%
+  
+  #Sort the data first by genome segment and then by deletion size
+  arrange(Segment, Deletion_Size) %>%
+  
+  #Create identifiers for plotting and preserve their order
+  mutate(
+    
+    #Combine the segment name and unique number into a unique deletion ID
+    Unique_ID = paste0(Segment, "_", Unique),
+    
+    #Convert the IDs to an ordered factor so plots retain this ordering
+    Unique_Ordered = fct_inorder(Unique_ID)
+  )
+
+ggplot(combined_df) +
+  facet_wrap(~Segment, ncol = 4, scales = "free") +
+  geom_segment(aes(x = 1, 
+                   xend = Length, 
+                   y = Unique_Ordered, 
+                   yend = Unique_Ordered,
+                   colour = DVG_abundance_focal_local_random),
+               linewidth = 0.5,
+               alpha = 0.7) +
+  geom_segment(aes(x = Start, 
+                   xend = End, 
+                   y = Unique_Ordered, 
+                   yend = Unique_Ordered), 
+               colour = "red",
+               linewidth = 0.8,
+               alpha = 0.9) +
+  scale_colour_viridis_c(option = "plasma", name = "Cheat Load") + 
+  theme_classic() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+```
+
+```{r}
+#| label: Analysis of Samples with Short Dominant DVGs
+
+# Function to identify samples where the most abundant DVG is shorter than 1000 bp
+smallcheats <- function(segment_name, df) {
+  
+  df |>
+    # Select data for the specified viral segment
+    filter(Segment == segment_name) |>
+    
+    # Group the data by sample
+    group_by(SRR) |>
+    
+    # Identify the single most abundant DVG in each sample
+    slice_max(
+      order_by = TotalRC,
+      n = 1,
+      with_ties = FALSE
+    ) |>
+    
+    # Retain samples where the most abundant DVG is shorter than 1000 bp
+    filter(DelLength < 1000) |>
+    
+    # Extract the sample IDs
+    pull(SRR)
+}
+
+# Define the viral segments to analyse
+segments <- c("PB1", "PB2", "PA")
+
+# Apply the smallcheats function to each viral segment
+results_list <- lapply(
+  segments,
+  smallcheats,
+  df = cheatload
+)
+
+# Assign the segment names to the resulting list
+names(results_list) <- segments
+
+# Combine the selected sample IDs and their corresponding segments into a data frame
+selected_srrs <- data.frame(
+  Segment = rep(names(results_list), lengths(results_list)),
+  SRR = unlist(results_list)
+)
+
+# Select the top five most abundant DVGs from each selected sample
+plot_data <- cheatload |>
+  
+  # Retain only samples identified as having a short dominant DVG
+  inner_join(
+    selected_srrs,
+    by = c("Segment", "SRR")
+  ) |>
+  
+  # Group the data by viral segment and sample
+  group_by(Segment, SRR) |>
+  
+  # Select the five most abundant DVGs in each sample
+  slice_max(
+    order_by = TotalRC,
+    n = 5,
+    with_ties = FALSE
+  ) |>
+  
+  # Order the DVGs from highest to lowest abundance within each sample
+  arrange(desc(TotalRC), .by_group = TRUE) |>
+  
+  # Assign an order number to each DVG for plotting
+  mutate(
+    Deletion_order = row_number()
+  ) |>
+  
+  # Remove the grouping structure
+  ungroup()
+
+# Function to generate plots for an individual viral segment
+plot_segment <- function(segment_name, data) {
+  
+  data |>
+    # Select data for the specified viral segment
+    filter(Segment == segment_name) |>
+    
+    # Initialise the ggplot
+    ggplot() +
+    
+    # Create a separate panel for each sample
+    facet_wrap(
+      ~SRR,
+      ncol = 4,
+      scales = "free"
+    ) +
+    
+    # Draw a line representing the full viral segment for each DVG
+    geom_segment(
+      aes(
+        x = 1,
+        xend = Length,
+        y = Deletion_order,
+        yend = Deletion_order,
+        # Colour the segment according to hospitalisation status
+        colour = `Hospitalized?`,
+        # Alternative colouring by DVG abundance
+        # colour = DVG_abundance_focal_local_random,
+      ),
+      linewidth = 0.8,
+      alpha = 0.9
+    ) +
+    
+    # Overlay the deleted region of each DVG in red
+    geom_segment(
+      aes(
+        x = Start,
+        xend = End,
+        y = Deletion_order,
+        yend = Deletion_order
+      ),
+      colour = "red",
+      linewidth = 1.2,
+      alpha = 1.3
+    ) +
+    
+    # Alternative continuous colour scale based on DVG abundance
+    # scale_colour_viridis_c(
+    #   option = "plasma",
+    #   name = "Cheat Load"
+    # ) +
+    
+    # Set a discrete colour scale based on hospitalisation status
+    scale_colour_viridis_d(
+      option = "plasma",
+      name = "Hospitalisation"
+    ) +
+    
+    # Apply a clean, classic ggplot theme
+    theme_classic() +
+    
+    # Remove y-axis labels and tick marks
+    theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank()
+    )
+}
+
+# Generate the plot for the PB1 segment
+pb1_plot <- plot_segment("PB1", plot_data)
+
+# Generate the plot for the PB2 segment
+pb2_plot <- plot_segment("PB2", plot_data)
+
+# Generate the plot for the PA segment
+pa_plot <- plot_segment("PA", plot_data)
+
+```
+
+```{r}
+#| label: Small-event linkage analysis and abundance comparison
+
+# Find the most abundant small deletion for each sample in each segment
+smallcheats <- function(segment_name, df2) {
+  df2 |>
+    filter(Segment == segment_name) |>
+    group_by(Sample) |>
+    slice_max(order_by = TotalRC, n = 1, with_ties = FALSE) |>
+    filter(DelLength < 1000) |>
+    select(Sample, Start, End)
+}
+
+segments <- c("PB1", "PB2", "PA")
+
+results_list <- lapply(segments, smallcheats, df2 = cheatload)
+names(results_list) <- segments
+
+small_samples <- bind_rows(results_list, .id = "Segment") |> 
+  as.data.frame()
+
+
+# Subset the recombination data to samples containing the small events
+base <- semi_join(recombdata, small_samples, by = c("Segment", "Sample")) |> 
+  filter(Type == "Del")
+
+# Find the most frequently observed deletion event for each sample
+top_events <- base |> 
+  count(Start, End, Sample, RecombEvent, Segment) |> 
+  group_by(Sample) |> 
+  filter(n == max(n)) |> 
+  ungroup()
+
+# Keep a unique list of the selected deletion events
+all_distinct <- top_events |>
+  distinct(
+    Sample,
+    Segment,
+    DeletionEvent = RecombEvent
+  )
+
+
+# Find other recombination events that share reads with each small event
+linkage.anal <- function(df_all, df_small, segment) {
+  
+  df_all <- df_all |>
+    filter(Segment == segment)
+  
+  df_small <- df_small |>
+    filter(Segment == segment)
+  
+  results <- list()
+  
+  for (i in df_small$RecombEvent) {
+    
+    # Get the reads belonging to the current small deletion
+    small_event_reads <- df_all |>
+      filter(RecombEvent == i)
+    
+    # Find other events that share those reads
+    linked_events <- df_all |>
+      filter(Reads %in% small_event_reads$Reads) |>
+      filter(RecombEvent != i)
+    
+    results[[as.character(i)]] <- linked_events
+  }
+  
+  return(results)
+}
+
+segments <- c("PB1", "PB2", "PA")
+
+results_list2 <- lapply(
+  segments,
+  linkage.anal,
+  df_all = base,
+  df_small = top_events
+)
+names(results_list2) <- segments
+
+
+# Combine the linkage results from all segments and deletion events
+combined_results <- imap_dfr(
+  results_list2,
+  function(segment_results, segment_name) {
+    
+    imap_dfr(
+      segment_results,
+      function(event_df, deletion_event) {
+        
+        event_df |>
+          mutate(
+            DeletionEvent = deletion_event
+          )
+      }
+    )
+  }
+) |> 
+  filter(RevCount == 2) |> 
+  select(Sample, Segment, Start, End, RecombEvent, DeletionEvent) |> 
+  distinct(
+    Sample,
+    DeletionEvent,
+    RecombEvent,
+    .keep_all = TRUE
+  ) |> 
+  group_by(Sample, Segment, DeletionEvent) |>
+  mutate(
+    # Number of unique start/end combinations linked to each deletion
+    nunique = n_distinct(paste(Start, End))
+  ) |>
+  ungroup()
+
+
+# Number of selected deletion events that have no detected linkage
+non_linked <- n_distinct(all_distinct$Sample) - n_distinct(combined_results$Sample)
+
+
+# Add the non-linked events as zeroes for the histogram only
+plot_data <- combined_results |>
+  group_by(Sample, Segment) |> 
+  reframe(
+    nunique = unique(nunique)
+  ) |> 
+  ungroup() |> 
+  pull(nunique) |> 
+  c(rep(0, non_linked))
+
+
+p1 <- ggplot(data.frame(nunique = plot_data), aes(x = nunique)) +
+  geom_histogram(
+    binwidth = 1,
+    boundary = -0.5
+  ) +
+  labs(
+    x = "Number of linked events",
+    y = "Number of deletion events"
+  )
+
+
+# Compare DVG abundance between samples with and without linkage
+linked_abun <- semi_join(abun, combined_results, by = "Sample")
+
+all_abun <- semi_join(abun, all_distinct, by = "Sample")
+
+combined_abun <- bind_rows(
+  linked_abun |> mutate(Linked = "Yes"),
+  all_abun |>  
+    anti_join(linked_abun, by = "Sample") |> 
+    mutate(Linked = "No")
+)
+
+
+p2 <- ggplot(
+  combined_abun,
+  aes(x = Linked, y = DVG_abundance_focal_local_random)
+) +
+  geom_boxplot() +
+  labs(
+    title = "DVG abundance based on linked or not linked small abundant cheats",
+    x = "Linkage Status",
+    y = "Cheat Load/DVG Abundance"
+  ) +
+  theme_minimal()
+```
+
+## Richness and Evenness Between Hospitalisation Groups
+
+Using the full dataset, including every DVG present in every sample, I performed pairwise dissimilarity comparisons using the Bray–Curtis metric. Results were visualised as box plots, coloured by comparison type (within-group: Hospitalised–Hospitalised or Not Hospitalised–Not Hospitalised; between-group: Hospitalised–Not Hospitalised), followed by statistical testing to assess significance.
+
+I additionally generated richness-versus-evenness plots to compare overall diversity across groups, and evenness-versus-DVG-abundance plots to examine whether DVG abundance was associated with DVG diversity within specific sample groups.
+
+As this analysis is part of ongoing research, results are not reported here; the analysis pipeline is provided below.
+
+```{r}
+#| label: Calculate pairwise DVG distances by hospitalisation status
+
+# Filter to H3N2 PB1 DVGs, bin breakpoint positions, and create a feature count matrix
+H3N2_f <- filter(DVGs, Subtype == "H3N2") %>% 
+  filter(Segment == "PB1") %>%
+  select(cols = -Subtype) %>% 
+  na.omit() %>%  # Included as a safeguard; no missing values are currently present
+  mutate(
+    StartBin = cut_interval(Start, length = 30, right = FALSE),
+    EndBin = cut_interval(End, length = 30, right = FALSE)
+  ) %>%
+  mutate(feature = paste0(StartBin, "_", EndBin)) %>%
+  select(cols = -c(Start, End, StartBin, EndBin, Segment)) %>%
+  pivot_wider(
+    names_from = feature,
+    values_from = TotalRC,
+    values_fill = 0,
+    values_fn = sum
+  ) %>%
+  as.data.frame()
+
+# Use SRR accession numbers as row names
+rownames(H3N2_f) <- H3N2_f$SRR
+H3N2_f <- H3N2_f[, -1]
+
+# Merge the feature matrix with sample metadata and remove samples with unknown hospitalisation status
+H3N2f_meta <- merge(H3N2_f, Meta_Data, by.x = "row.names", by.y = "SRR") %>% 
+  filter(`Hospitalized?` != "Unknown")
+
+rownames(H3N2f_meta) <- H3N2f_meta$Row.names
+# 109 H3N2 samples with known hospitalisation status
+
+# Calculate total DVG reads per sample and retain samples with at least 50 reads
+rowSums(dplyr::select(H3N2f_meta, 2:(ncol(H3N2_f) + 1))) -> H3N2f_meta$Total_DVG_reads
+H3N2f_meta %<>% filter(Total_DVG_reads >= 50)
+
+# Extract only the DVG feature matrix for distance calculations
+dfDist <- dplyr::select(H3N2f_meta, 2:(ncol(H3N2_f) + 1))
+
+# Calculate Bray-Curtis distances after rarefying each sample to 50 DVG reads
+dist_all <- avgdist(
+  x = dfDist,
+  sample = 50,
+  dmethod = "bray"
+)
+
+# Calculate distance matrices separately for hospitalised and non-hospitalised samples
+Hospitalised_Matrix <- filter(H3N2f_meta, `Hospitalized?` == "Yes") %>%
+  dplyr::select(2:(ncol(H3N2_f) + 1)) %>%
+  avgdist(dmethod = "bray", sample = 50)
+
+Not_Matrix <- filter(H3N2f_meta, `Hospitalized?` == "No") %>%
+  select(2:(ncol(H3N2_f) + 1)) %>%
+  avgdist(dmethod = "bray", sample = 50)
+
+# Remove missing values and diagonal zeros from each distance matrix
+clean_not <- Not_Matrix[!is.na(Not_Matrix) & Not_Matrix != 0]
+clean_hosp <- Hospitalised_Matrix[!is.na(Hospitalised_Matrix) & Hospitalised_Matrix != 0]
+clean_all <- dist_all[!is.na(dist_all) & dist_all != 0]
+
+# Convert a symmetric distance matrix into a data frame of unique sample pairs and distances
+extract_pairwise_pairs <- function(mat) {
+  
+  mat <- as.matrix(mat)  # Ensure the input is a matrix
+  
+  # Identify unique pairwise comparisons using the lower triangle
+  lower_indices <- lower.tri(mat)
+  
+  # Retrieve the sample names for each comparison
+  row_names <- rownames(mat)[row(mat)[lower_indices]]
+  col_names <- colnames(mat)[col(mat)[lower_indices]]
+  
+  # Sort sample names so each pair has a consistent label
+  sorted_pairs <- pmin(row_names, col_names)
+  sorted_pairs2 <- pmax(row_names, col_names)
+  
+  # Create unique pair identifiers
+  pair_labels <- paste0(sorted_pairs, "___", sorted_pairs2)
+  
+  # Extract the corresponding distance values
+  pair_values <- mat[lower_indices]
+  
+  # Return pair labels and distances as a data frame
+  result_matrix <- data.frame(
+    Pair = pair_labels,
+    Value = pair_values
+  )
+  
+  return(result_matrix)
+}
+
+# Convert each distance matrix into a pairwise comparison data frame
+all_df <- extract_pairwise_pairs(dist_all)
+
+nn_df <- extract_pairwise_pairs(Not_Matrix) %>%
+  mutate(Type = "No_vs_No")
+
+hh_df <- extract_pairwise_pairs(Hospitalised_Matrix) %>%
+  mutate(Type = "Yes_vs_Yes")
+
+# Identify comparisons between hospitalised and non-hospitalised samples
+hospvnot_labels <- setdiff(setdiff(all_df$Pair, nn_df$Pair), hh_df$Pair)
+
+hospvnot <- all_df$Value[all_df$Pair %in% hospvnot_labels]
+
+hn_df <- as.data.frame(cbind(hospvnot_labels, hospvnot)) %>%
+  mutate(Type = "Yes_vs_No") %>%
+  rename(
+    Pair = hospvnot_labels,
+    Value = hospvnot
+  )
+
+# Check the number of hospitalised vs non-hospitalised comparisons
+length(hospvnot)
+
+# Combine all pairwise comparisons into a single long-format data frame
+LongDf <- rbind(hn_df, nn_df, hh_df) %>%
+  mutate(Value = as.numeric(Value))
+
+```
+
+```{r}
+#| label: Boxplot and Statistical Analysis
+
+#BoxPlot
+colnames(LongDf)
+str(LongDf)
+
+ggplot(LongDf, aes(x = Type, 
+                   y = Value,
+                   fill = Type)) +
+  geom_boxplot(outlier.shape = ".") +
+  labs(title = "Distance Dissimilarity between Hospitalised and Not Hospitalised Patients in PB1 Segment Cheats", 
+       x = "Distance Matrix Comparisons", 
+       y = "Distance Dissimilarity (Bray-Curtis)") +
+  theme_classic()
+
+
+#Regression analysis and plots of residuals
+test <- betareg(Value ~ Type,
+                data = LongDf, link = 'logit')
+
+check_model(test, residual_type
+            = "normal")
+
+#Statistical Tests
+Anova(test) #Significant differences in bc distanbce among groups
+glance(test) #no pseudo Rsq available
+summary(test) #no no most disimilar followed by yes no and then yes yes
+emmeans(test, pairwise~Type, adjust='fdr', mode="response") #All pairs significantly different
+
+```
+
+```{r}
+#| label: Richness and Evenness Analysis
+
+# Prepare H3N2 PB1 DVG data for richness and diversity analysis
+H3N2_re <- filter(DVGs, Subtype == "H3N2") %>% 
+  filter(Segment == "PB1") %>%
+  select(cols = -Subtype) %>% 
+  na.omit() %>%  # Included as a safeguard; no missing values are currently present
+  mutate(
+    StartBin = cut_interval(Start, length = 30, right = FALSE),
+    EndBin = cut_interval(End, length = 30, right = FALSE)
+  ) %>%
+  mutate(feature = paste0(StartBin, "_", EndBin)) %>%
+  merge(Meta_Data, by.x = "SRR", by.y = "SRR") %>%
+  filter(`Hospitalized?` != "Unknown") %>% 
+  select(feature, SRR, TotalRC, `Hospitalized?`)
+
+# Calculate feature richness and Simpson diversity by hospitalisation status
+Rich_Even <- H3N2_re %>%
+  group_by(feature, `Hospitalized?`) %>%
+  summarise(
+    sobs_richness = specnumber(TotalRC),
+    simpson = diversity(TotalRC, index = "simpson"),
+    .groups = "drop"
+  )
+
+# Visualise the relationship between richness and Simpson diversity
+ggplot(Rich_Even, aes(x = simpson, y = sobs_richness)) +
+  geom_point(aes(colour = `Hospitalized?`))
+
+```
+
+```{r}
+#| label: Evenness vs DVG Abundance Analysis
+
+set.seed(38)
+
+# Rarefy each sample to the minimum sequencing depth across all samples
+spc.b.r <- rrarefy(dfDist, min(rowSums(dfDist)))
+
+# Remove features that are absent after rarefaction
+spc.b.r <- spc.b.r[, colSums(spc.b.r) > 0]
+
+# Restore SRR accession numbers as row names
+rownames(spc.b.r) <- H3N2f_meta$Row.names
+
+# Convert the rarefied feature matrix to long format
+rare.long <- spc.b.r %>% 
+  as_tibble(rownames = "SRR") %>% 
+  mutate(across(-SRR, ~ na_if(., 0))) %>% 
+  pivot_longer(
+    cols = -SRR,
+    names_to = "Bins",
+    values_to = "TotalRC",
+    values_drop_na = TRUE
+  )
+
+# Combine rarefied counts with sample metadata and abundance measurements
+combined_df <- list(rare.long, Meta_Data, abund) %>% 
+  reduce(left_join, by = "SRR")
+
+# Calculate Simpson diversity for each sample
+ae.df <- combined_df %>% 
+  group_by(SRR) %>% 
+  summarise(
+    simpson = diversity(TotalRC, index = "simpson")
+  )
+
+# Plot Simpson diversity against PB1 DVG abundance, coloured by hospitalisation status
+merge(ae.df, combined_df, by = "SRR") %>% 
+  ggplot(aes(
+    x = PB1_DVG_abundance_focal_local_segment,
+    y = simpson
+  )) +
+  geom_point(aes(colour = `Hospitalized?`)) +
+  stat_ellipse(aes(colour = `Hospitalized?`))
+
+```
+
+## Principal Component Analysis of DVG Abundance, Coloured by Hospitalisation Status
+
+To further characterise the relationship between DVG abundance profiles and hospitalisation status, I performed principal component analysis (PCA) to reduce the dimensionality of abundance data across all eight genomic segments for each sample.
+
+This analysis was intended to assess whether samples clustered by hospitalisation status on the basis of their DVG abundance profiles, and by extension, whether particular DVGs were differentially abundant between hospitalised and non-hospitalised individuals. More broadly, this aimed to establish whether specific DVG community compositions are associated with hospitalisation outcome.
+
+As this analysis is part of ongoing research, results are not reported here; the code used is provided below.
+
+```{r}
+#| label: Data Processing
+
+#Data transformation
+Merged <- merge(Depth, Meta_Data, by.x = "SRR", by.y = "Run") %>% 
+  filter(!`Hospitalized?` == "Unknown") 
+
+Merged_mat <- Merged %>%  
+  pivot_longer(cols = HA_depth:PB2_depth, names_to = "Segments", values_to = "Read_Depth") %>% 
+  select(SRR, Read_Depth, Segments) %>% 
+  pivot_wider(names_from = SRR, values_from= Read_Depth) %>%
+  as.data.frame()
+
+
+rownames(Merged_mat) <- Merged_mat$Segments
+Merged_mat <- Merged_mat[,-1]
+
+#Normalize for total read depth per sample (Convert to Counts Per Million)
+cpm_merged <- apply(Merged_mat, 2, function(x) (x / sum(x)) * 1000000)
+
+#Log-transform to handle the massive range between high and low depths and adding a small pseudo-count (+1) to avoid log(0) errors
+log_cpm <- log2(cpm_merged + 1)
+
+#Running and visusalising PCA
+pca_result <- prcomp(t(log_cpm), scale. = TRUE) 
+p1 <- fviz_pca_ind(pca_result, repel = TRUE, addEllipses = FALSE, title = "PCA of Read Depth For Each DVG Segment", geom = "point")
+
+#Extract the coordinates (stored in the '$x' matrix) and convert to a dataframe
+pca_coords <- as.data.frame(pca_result$x)
+
+#Adding categorical column back to these coordinates
+pca_coords$Hospitalized <- Merged$`Hospitalized?`
+
+ggplot(pca_coords, aes(x = PC1, y = PC2, color = Hospitalized)) +
+  geom_point(size = 3, alpha = 0.8) +
+  labs(title = "PCA on Segment Read Depth between Samples, Coloured by Hospitalization")+
+  theme_minimal()
+```
+
+```{r}
+#| label: Prepare DVG abundance matrix for PCA
+
+# Merge DVG abundance data with sample metadata and remove samples with unknown hospitalisation status
+abund_hosp <- merge(abund, Meta_Data, by.x = "SRR", by.y = "Run") %>%
+  filter(`Hospitalized?` != "Unknown")
+
+# Rename abundance columns to shorter segment names and reshape the data
+ah_long <- abund_hosp %>%
+  pivot_longer(
+    cols = Random:PB2,
+    names_to = "Segments",
+    values_to = "Read_Depth"
+  ) %>%
+  select(SRR, Read_Depth, Segments) %>%
+  pivot_wider(
+    names_from = SRR,
+    values_from = Read_Depth
+  ) %>%
+  as.data.frame()
+
+# Use segment names as row names
+rownames(ah_long) <- ah_long$Segments
+
+# Remove the segment name column
+ah_mat <- ah_long[, -1]
+
+# Transpose the matrix so rows represent samples and columns represent segments
+t_ah_mat <- t(ah_mat) %>%
+  as.data.frame()
+
+```
+
+```{r}
+#| label: Prepare relative segment abundances
+
+# Remove the overall DVG abundance column
+t_ah_mat_df <- t_ah_mat[, -1]
+
+# Convert each sample to relative segment abundances
+t_ah_mat_df <- apply(
+  t_ah_mat_df,
+  1,
+  function(x) x / sum(x)
+) %>%
+  t()
+
+# Inspect samples with unexpected values
+t_ah_mat_df[c("SRR7889156", "SRR7889183"), ]
+
+# Replace rows containing only missing values with zeros
+t_ah_mat_df[is.na(rowSums(t_ah_mat_df)), ] <- 0
+```
+
+```{r}
+#| label: Perform PCA and Visualise Results
+
+# Run PCA on relative segment abundances
+pca_ah <- prcomp(t_ah_mat_df, scale. = TRUE)
+
+# Extract sample coordinates in principal component space
+pca_coords <- as.data.frame(pca_ah$x)
+
+# Add sample metadata for plotting
+pca_coords$Hospitalized <- abund_hosp$`Hospitalized?`
+
+# Classify samples by overall DVG abundance
+pca_coords <- pca_coords %>%
+  mutate(
+    label = ifelse(
+      t_ah_mat$Random > 0.5,
+      "Over 50",
+      "Under 50"
+    )
+  )
+
+# Create subsets for high- and low-abundance samples
+over_50 <- t_ah_mat %>%
+  filter(Random > 0.5)
+
+under_50 <- t_ah_mat %>%
+  filter(Random <= 0.5)
+
+# Display the variance explained by each principal component
+screeplot(
+  pca_ah,
+  type = "lines",
+  main = "Scree Plot"
+)
+
+# PCA scatter plot using ggplot2
+ggplot(
+  pca_coords,
+  aes(x = PC1, y = PC2, colour = label)
+) +
+  geom_point(size = 3, alpha = 0.8) +
+  stat_ellipse() +
+  geom_quasirandom(
+    method = "smiley",
+    varwidth = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "PCA of Relative DVG Segment Abundance",
+    colour = "Overall DVG abundance"
+  ) +
+  theme_minimal()
+
+# PCA scatter plot with confidence ellipses using factoextra
+fviz_pca_ind(
+  pca_ah,
+  repel = TRUE,
+  addEllipses = TRUE,
+  title = "PCA of Relative DVG Segment Abundance",
+  habillage = pca_coords$label,
+  ellipse.type = "confidence",
+  geom = "point",
+  pointsize = 3
+)
+
+# Prepare the first three principal components for 3D visualisation
+data.frame(
+  PC1 = pca_ah$x[, 1],
+  PC2 = pca_ah$x[, 2],
+  PC3 = pca_ah$x[, 3],
+  Group = t_ah_mat$Random
+)
+
+# Create an interactive 3D PCA plot
+plot_ly(
+  data = threedim_coordinates,
+  x = ~PC1,
+  y = ~PC2,
+  z = ~PC3,
+  color = ~Group,
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 5)
+) %>%
+  layout(
+    scene = list(
+      xaxis = list(title = "PC1"),
+      yaxis = list(title = "PC2"),
+      zaxis = list(title = "PC3")
+    )
+  )
+
+```
+
+```{r}
+#| label: DVG abundance of polymerase segments vs DVG abundance of random
+
+polvall <- abund |> 
+  mutate(pol_abund = PB1 + PB2 + PA) |> 
+  mutate(totalDVG = rowSums(across(3:10), na.rm = TRUE)) |> 
+  mutate(percentage_pol = pol_abund / totalDVG)
+
+ggplot(polvall, aes(x = Random, y = percentage_pol)) + 
+  geom_point()+
+  theme_minimal()
+```
