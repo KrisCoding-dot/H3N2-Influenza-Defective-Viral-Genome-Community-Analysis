@@ -78,8 +78,7 @@ This analysis included PCA of sequencing depth and relative DVG segment abundanc
 The repository contains:
 
 - **Analysis report** — a detailed account of the methods, analyses, and findings from the project.
-- **R code** — scripts and code chunks used for data processing, statistical analysis, and visualisation.
-- **Figures** — plots produced during the analyses, where suitable for public release.
+- **R code** — scripts and code chunks used for data processing, statistical analysis, and visualisation. **Found within the report**
 
 ## Methods and skills demonstrated
 
