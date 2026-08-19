@@ -79,6 +79,7 @@ The repository contains:
 
 - **Analysis report** — a detailed account of the methods, analyses, and findings from the project.
 - **R code** — scripts and code chunks used for data processing, statistical analysis, and visualisation. **Found within the report**
+- **Plots** - handful of plots produced from the original code as examples.
 
 ## Methods and skills demonstrated
 
